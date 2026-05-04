@@ -30,85 +30,112 @@ app.get("/expand/:type/:id", async (req, res) => {
 
     if (type === "artist") {
       query = `
-        SELECT l.id, l.name, l.profile, al.release_count, l.total_release_count AS total
-        FROM artist_label al
-        JOIN label l ON l.id = al.label_id
-        WHERE al.artist_id = $1
-        ORDER BY al.release_count DESC
-        LIMIT 10;
+        SELECT 
+        l.id AS label_id,
+        l.name,
+        l.profile,
+        al.release_count,
+        l.total_release_count AS total,
+
+        ls.style AS style,
+        ls.release_count AS style_count
+
+      FROM artist_label al
+      JOIN label l 
+        ON l.id = al.label_id
+
+      LEFT JOIN label_style ls 
+        ON ls.label_id = l.id
+
+      WHERE al.artist_id = $1;
+      ORDER BY al.release_count DESC, ls.release_count DESC;
+      LIMIT 10;
       `;
       nodeType = "label";
-
-      styleQuery = `
-        SELECT style, release_count
-        FROM artist_style
-        WHERE artist_id = $1
-        ORDER BY release_count DESC
-        LIMIT 10;
-      `;
     }
 
     else if (type === "label") {
       query = `
-        SELECT a.id, a.name, a.profile, al.release_count, a.total_release_count AS total
+        SELECT 
+          a.id AS artist_id,
+          a.name,
+          a.profile,
+          al.release_count,
+          a.total_release_count AS total,
+
+          ast.style AS style,
+          ast.release_count AS style_count
+
         FROM artist_label al
-        JOIN artist a ON a.id = al.artist_id
-        WHERE al.label_id = $1
-        ORDER BY al.release_count DESC
+        JOIN artist a 
+          ON a.id = al.artist_id
+
+        LEFT JOIN artist_style ast 
+          ON ast.artist_id = a.id
+
+        WHERE al.label_id = $1;
+        ORDER BY al.release_count DESC, ast.release_count DESC;
         LIMIT 20;
       `;
       nodeType = "artist";
-
-      styleQuery = `
-        SELECT style, release_count
-        FROM label_style
-        WHERE label_id = $1
-        ORDER BY release_count DESC
-        LIMIT 10;
-      `;
     }
 
     else {
       return res.status(400).json({ error: "Invalid type" });
     }
 
-    // 🔥 run both queries in parallel
-    const [result, stylesRes] = await Promise.all([
-      pool.query(query, [id]),
-      pool.query(styleQuery, [id])
-    ]);
+    const result = await pool.query(query, [id]);
 
-    // -----------------------
+
     // nodes + links
-    // -----------------------
-    const nodes = result.rows.map(r => ({
-      id: `${nodeType}_${r.id}`,
-      rawId: r.id,
-      type: nodeType,
-      name: r.name,
-      release_count: Number(r.release_count),
-      total_release_count: Number(r.total),
-      profile: r.profile
-    }));
 
-    const links = result.rows.map(r => ({
-      source: `${type}_${id}`,
-      target: `${nodeType}_${r.id}`,
-      weight: Number(r.release_count)
-    }));
+    result.rows.forEach(r => {
 
-    // -----------------------
-    // styles
-    // -----------------------
-    const styles = stylesRes.rows.map(s => ({
-      style: s.style,
-      release_count: Number(s.release_count)
-    }));
+      const nodeId = `${nodeType}_${r.id}`;
+
+      // -------------------
+      // NODE
+      // -------------------
+      if (!nodes.has(nodeId)) {
+        nodes.set(nodeId, {
+          id: nodeId,
+          rawId: r.id,
+          type: nodeType,
+          name: r.name,
+          profile: r.profile,
+          release_count: Number(r.release_count),
+          total_release_count: Number(r.total)
+        });
+      }
+
+      // -------------------
+      // STRUCTURE EDGE
+      // -------------------
+      links.push({
+        source: `${type}_${id}`,
+        target: nodeId,
+        weight: Number(r.release_count)
+      });
+
+      // -------------------
+      // STYLE EDGE
+      // -------------------
+      if (r.style) {
+        const styleId = `style_${r.style.toLowerCase().replace(/\s+/g, "_")}`;
+
+        styleEdges.set(`${nodeId}-${styleId}`, {
+          source: nodeId,
+          target: styleId,
+          style: r.style,
+          weight: Number(r.style_count || 1)
+        });
+      }
+    });
 
     return res.json({
-      nodes,
+      nodes: [...nodes.values()],
       links,
-      styles // 🔥 add this
+      styleLinks: [...styleEdges.values()]
     });
 
   } catch (err) {
