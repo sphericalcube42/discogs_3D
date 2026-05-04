@@ -19,107 +19,103 @@ const pool = new Pool({
   port: 5432,
 });
 
-// 🎯 Expand endpoint
+//expand endpoint
 app.get("/expand/:type/:id", async (req, res) => {
   const { type, id } = req.params;
 
   try {
-    let result;
+    let query;
+    let nodeType;
+    let styleQuery;
 
     if (type === "artist") {
-      result = await pool.query(
-        `
-        SELECT l.id, l.name, l.profile, al.release_count, l.total_release_count AS label_total
+      query = `
+        SELECT l.id, l.name, l.profile, al.release_count, l.total_release_count AS total
         FROM artist_label al
         JOIN label l ON l.id = al.label_id
-        JOIN artist a ON a.id = al.artist_id
         WHERE al.artist_id = $1
         ORDER BY al.release_count DESC
         LIMIT 10;
-        `,
-        [id]
-      );
+      `;
+      nodeType = "label";
 
-      const nodes = result.rows.map((r) => ({
-        id: `label_${r.id}`,
-        rawId: r.id,
-        type: "label",
-        name: r.name,
-        release_count: Number(r.release_count),
-        total_release_count: Number(r.label_total),
-        profile: r.profile,
-      }));
-
-      const links = result.rows.map((r) => ({
-        source: `artist_${id}`,
-        target: `label_${r.id}`,
-        weight: Number(r.release_count),
-      }));
-
-      const labels = result.rows.map(r => ({
-        id: r.id,
-        name: r.name,
-        release_count: Number(r.release_count),
-      }));
-
-
-      return res.json({
-        nodes,
-        links,
-        labels,
-      });
+      styleQuery = `
+        SELECT style, release_count
+        FROM artist_style
+        WHERE artist_id = $1
+        ORDER BY release_count DESC
+        LIMIT 10;
+      `;
     }
 
-    if (type === "label") {
-      result = await pool.query(
-        `
-        SELECT a.id, a.name,a.profile, al.release_count, a.total_release_count AS artist_total
+    else if (type === "label") {
+      query = `
+        SELECT a.id, a.name, a.profile, al.release_count, a.total_release_count AS total
         FROM artist_label al
         JOIN artist a ON a.id = al.artist_id
-        JOIN label l ON l.id = al.label_id
         WHERE al.label_id = $1
         ORDER BY al.release_count DESC
         LIMIT 20;
-        `,
-        [id]
-      );
+      `;
+      nodeType = "artist";
 
-      const nodes = result.rows.map((r) => ({
-        id: `artist_${r.id}`,
-        rawId: r.id,
-        type: "artist",
-        name: r.name,
-        release_count: Number(r.release_count),
-        total_release_count: Number(r.artist_total),
-        profile: r.profile,
-      }));
-
-      const links = result.rows.map((r) => ({
-        source: `label_${id}`,
-        target: `artist_${r.id}`,
-        weight: Number(r.release_count),
-      }));
-
-      const artists = result.rows.map(r => ({
-        id: r.id,
-        name: r.name,
-        release_count: Number(r.release_count)
-      }));
-
-      return res.json({
-        nodes,
-        links,
-        artists,
-      });
+      styleQuery = `
+        SELECT style, release_count
+        FROM label_style
+        WHERE label_id = $1
+        ORDER BY release_count DESC
+        LIMIT 10;
+      `;
     }
 
-    res.status(400).json({ error: "Invalid type" });
+    else {
+      return res.status(400).json({ error: "Invalid type" });
+    }
+
+    // 🔥 run both queries in parallel
+    const [result, stylesRes] = await Promise.all([
+      pool.query(query, [id]),
+      pool.query(styleQuery, [id])
+    ]);
+
+    // -----------------------
+    // nodes + links
+    // -----------------------
+    const nodes = result.rows.map(r => ({
+      id: `${nodeType}_${r.id}`,
+      rawId: r.id,
+      type: nodeType,
+      name: r.name,
+      release_count: Number(r.release_count),
+      total_release_count: Number(r.total),
+      profile: r.profile
+    }));
+
+    const links = result.rows.map(r => ({
+      source: `${type}_${id}`,
+      target: `${nodeType}_${r.id}`,
+      weight: Number(r.release_count)
+    }));
+
+    // -----------------------
+    // styles
+    // -----------------------
+    const styles = stylesRes.rows.map(s => ({
+      style: s.style,
+      release_count: Number(s.release_count)
+    }));
+
+    return res.json({
+      nodes,
+      links,
+      styles // 🔥 add this
+    });
+
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Server error" });
   }
 });
-
 //Search Endpoint
 app.get("/search", async (req, res) => {
   const { q, type } = req.query; 
@@ -187,43 +183,43 @@ app.get("/entity/:type/:id", async (req, res) => {
   const { type, id } = req.params;
 
   try {
-    let masterIds = [];
+    let releaseIds = [];
 
     // -----------------------
     // ARTIST → masters
     // -----------------------
     if (type === "artist") {
-      const mastersRes = await pool.query(
-        `SELECT m.id AS master_id
-        FROM master_artist ma
-        JOIN master m ON m.id = ma.master_id
-        WHERE ma.artist_id = $1
-        ORDER BY m.release_count DESC
+      const releaseRes = await pool.query(
+        `SELECT r.id AS release_id
+        FROM release_artist ra
+        JOIN release r ON r.id = ra.release_id
+        WHERE ra.artist_id = $1
+        ORDER BY r.release_count DESC
         LIMIT 20
       `,
         [id]
       );
 
-      masterIds = mastersRes.rows.map(r => r.master_id);
+      releaseIds = releaseRes.rows.map(r => r.release_id);
     }
 
     // -----------------------
     // LABEL → masters (via release)
     // -----------------------
     else if (type === "label") {
-      const mastersRes = await pool.query(
+      const releaseRes = await pool.query(
         `
-        SELECT m.id AS master_id
+        SELECT r.id AS release_id
         FROM release_label rl
-        JOIN master m ON m.main_release = rl.release_id
+        JOIN release r ON r.release = rl.release_id
         WHERE rl.label_id = $1
-        ORDER BY m.release_count DESC
+        ORDER BY r.release_count DESC
         LIMIT 20;
           `,
         [id]
       );
 
-      masterIds = mastersRes.rows.map(r => r.master_id);
+      releaseIds = releaseRes.rows.map(r => r.release_id);
     }
 
     else {
@@ -236,7 +232,7 @@ app.get("/entity/:type/:id", async (req, res) => {
       pool.query(
         `
         SELECT DISTINCT *
-        FROM master_style
+        FROM release_style
         WHERE master_id = ANY($1)
         `,
         [masterIds]
