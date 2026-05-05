@@ -24,6 +24,7 @@ export function runLayout(params = {}) {
 
     // 🔥 IMPORTANT: must pass function directly
     idealEdgeLength: params.idealEdgeLength,
+    nodeSeparation: 200,
 
     edgeElasticity: params.edgeElasticity
   });

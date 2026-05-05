@@ -76,7 +76,7 @@ export function initPhysicsPanel() {
       // 🔥 weight-aware edge length
       idealEdgeLength: (edge) => {
         const w = Number(edge.data("weight")) || 1;
-        const scaled = Math.log(w + 1);
+        const scaled = Math.log(100*w + 1);
 
         // stronger weight → shorter edge
         return baseLength / scaled;
@@ -87,7 +87,7 @@ export function initPhysicsPanel() {
         const w = Number(edge.data("weight")) || 1;
 
         // stronger edges = stronger pull
-        return Math.min(Math.log(w + 1) * 2, 50);
+        return Math.min(Math.log(100*w + 1) * 2, 50);
       }
     };
   }

@@ -31,52 +31,79 @@ app.get("/expand/:type/:id", async (req, res) => {
     if (type === "artist") {
       query = `
         SELECT 
-        l.id AS label_id,
-        l.name,
-        l.profile,
-        al.release_count,
-        l.total_release_count AS total,
-
-        ls.style AS style,
-        ls.release_count AS style_count
-
-      FROM artist_label al
-      JOIN label l 
-        ON l.id = al.label_id
-
-      LEFT JOIN label_style ls 
-        ON ls.label_id = l.id
-
-      WHERE al.artist_id = $1;
-      ORDER BY al.release_count DESC, ls.release_count DESC;
-      LIMIT 10;
+          l.id,
+          l.name,
+          l.profile,
+          al.release_count,
+          l.total_release_count AS total
+        FROM artist_label al
+        JOIN label l ON l.id = al.label_id
+        WHERE al.artist_id = $1
+        ORDER BY al.release_count DESC
+        LIMIT 10;
       `;
+      
+      styleQuery = `
+        SELECT *
+        FROM (
+          SELECT 
+            ls.label_id,
+            ls.style,
+            ls.release_count,
+            s.release_count AS total,
+            ROW_NUMBER() OVER (
+              PARTITION BY ls.label_id 
+              ORDER BY ls.release_count DESC
+            ) AS rn
+          FROM label_style AS ls
+        JOIN style s 
+          ON s.style = ls.style
+          WHERE ls.label_id = ANY($1::int[])
+        ) ranked
+        WHERE rn <= 3
+        ORDER BY release_count DESC
+        LIMIT 30;
+      `;
+      
       nodeType = "label";
-    }
-
-    else if (type === "label") {
+    
+    } else if (type === "label") {
       query = `
         SELECT 
-          a.id AS artist_id,
+          a.id,
           a.name,
           a.profile,
           al.release_count,
-          a.total_release_count AS total,
-
-          ast.style AS style,
-          ast.release_count AS style_count
-
+          a.total_release_count AS total
         FROM artist_label al
-        JOIN artist a 
-          ON a.id = al.artist_id
-
-        LEFT JOIN artist_style ast 
-          ON ast.artist_id = a.id
-
-        WHERE al.label_id = $1;
-        ORDER BY al.release_count DESC, ast.release_count DESC;
+        JOIN artist a ON a.id = al.artist_id
+        WHERE al.label_id = $1
+        ORDER BY al.release_count DESC
         LIMIT 20;
       `;
+
+      styleQuery = `
+        SELECT *
+        FROM (
+          SELECT 
+            ast.artist_id,
+            ast.style,
+            ast.release_count,
+            s.release_count AS total,
+            ROW_NUMBER() OVER (
+              PARTITION BY ast.artist_id 
+              ORDER BY ast.release_count DESC
+            ) AS rn
+          FROM artist_style AS ast
+          JOIN style s 
+            ON s.style = ast.style
+          WHERE ast.artist_id = ANY($1::int[])
+        ) ranked
+        WHERE rn <= 3
+        ORDER BY release_count DESC
+        LIMIT 30;
+      `;
+
       nodeType = "artist";
     }
 
@@ -84,12 +111,15 @@ app.get("/expand/:type/:id", async (req, res) => {
       return res.status(400).json({ error: "Invalid type" });
     }
 
-    const result = await pool.query(query, [id]);
+    const structureResult = await pool.query(query, [id]);
+    const labelIds = structureResult.rows.map(r => Number(r.id));
+    const styleResult = await pool.query(styleQuery, [labelIds]);
 
 
-    // nodes + links
+    const nodes = new Map();
+    const linkMap = new Map();
 
-    result.rows.forEach(r => {
+    structureResult.rows.forEach(r => {
 
       const nodeId = `${nodeType}_${r.id}`;
 
@@ -111,38 +141,51 @@ app.get("/expand/:type/:id", async (req, res) => {
       // -------------------
       // STRUCTURE EDGE
       // -------------------
-      links.push({
-        source: `${type}_${id}`,
-        target: nodeId,
-        weight: Number(r.release_count)
-      });
+      const structureKey = `${type}_${id}-${nodeId}`;
 
-      // -------------------
-      // STYLE EDGE
-      // -------------------
-      if (r.style) {
-        const styleId = `style_${r.style.toLowerCase().replace(/\s+/g, "_")}`;
-
-        styleEdges.set(`${nodeId}-${styleId}`, {
-          source: nodeId,
-          target: styleId,
-          style: r.style,
-          weight: Number(r.style_count || 1)
+      if (!linkMap.has(structureKey)) {
+        linkMap.set(structureKey, {
+          source: `${type}_${id}`,
+          target: nodeId,
+          weight: Number(r.release_count)
         });
       }
     });
 
+    const styleLinkMap = new Map();
+
+    styleResult.rows.forEach(s => {
+
+      const baseId = s.label_id ?? s.artist_id;
+      const nodeId = `${nodeType}_${baseId}`;
+
+      const styleId = `style_${s.style.toLowerCase().replace(/\s+/g, "_")}`;
+
+      const key = `${nodeId}-${styleId}`;
+
+      if (!styleLinkMap.has(key)) {
+        styleLinkMap.set(key, {
+          source: nodeId,
+          target: styleId,
+          style: s.style,
+          weight: Number(s.release_count || 1),
+          total: Number(s.total)
+        });
+      }
+    });
+    console.log(styleLinkMap.values())
     return res.json({
       nodes: [...nodes.values()],
-      links,
-      styleLinks: [...styleEdges.values()]
+      links: [...linkMap.values()],
+      styleLinks: [...styleLinkMap.values()]
     });
+        
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Server error" });
+    }
+  });
 
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: "Server error" });
-  }
-});
 //Search Endpoint
 app.get("/search", async (req, res) => {
   const { q, type } = req.query; 
@@ -205,50 +248,43 @@ app.get("/search", async (req, res) => {
   }
 });
 
-// api.js
 app.get("/entity/:type/:id", async (req, res) => {
   const { type, id } = req.params;
-
   try {
-    let releaseIds = [];
-
+    let masterIds = [];
     // -----------------------
     // ARTIST → masters
     // -----------------------
     if (type === "artist") {
-      const releaseRes = await pool.query(
-        `SELECT r.id AS release_id
-        FROM release_artist ra
-        JOIN release r ON r.id = ra.release_id
-        WHERE ra.artist_id = $1
-        ORDER BY r.release_count DESC
+      const mastersRes = await pool.query(
+        `SELECT m.id AS master_id
+        FROM master_artist ma
+        JOIN master m ON m.id = ma.master_id
+        WHERE ma.artist_id = $1
+        ORDER BY m.release_count DESC
         LIMIT 20
       `,
         [id]
       );
-
-      releaseIds = releaseRes.rows.map(r => r.release_id);
+      masterIds = mastersRes.rows.map(r => r.master_id);
     }
-
     // -----------------------
     // LABEL → masters (via release)
     // -----------------------
     else if (type === "label") {
-      const releaseRes = await pool.query(
+      const mastersRes = await pool.query(
         `
-        SELECT r.id AS release_id
+        SELECT m.id AS master_id
         FROM release_label rl
-        JOIN release r ON r.release = rl.release_id
+        JOIN master m ON m.main_release = rl.release_id
         WHERE rl.label_id = $1
-        ORDER BY r.release_count DESC
+        ORDER BY m.release_count DESC
         LIMIT 20;
           `,
         [id]
       );
-
-      releaseIds = releaseRes.rows.map(r => r.release_id);
+      masterIds = mastersRes.rows.map(r => r.master_id);
     }
-
     else {
       return res.status(400).json({ error: "Invalid type" });
     }
@@ -259,12 +295,11 @@ app.get("/entity/:type/:id", async (req, res) => {
       pool.query(
         `
         SELECT DISTINCT *
-        FROM release_style
+        FROM master_style
         WHERE master_id = ANY($1)
         `,
         [masterIds]
       ),
-
       pool.query(
         `
         SELECT DISTINCT *
@@ -273,7 +308,6 @@ app.get("/entity/:type/:id", async (req, res) => {
         `,
         [masterIds]
       ),
-
       pool.query(
         `
         SELECT title, uri
@@ -295,14 +329,12 @@ app.get("/entity/:type/:id", async (req, res) => {
       genres: genres.rows,
       videos: videos.rows
     });
-
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: "Server error" });
   }
 });
 
-  
 
 // ❤️ Health check
 app.get("/", (req, res) => {
