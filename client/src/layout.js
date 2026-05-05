@@ -50,13 +50,13 @@ export function runLayout(params = {}) {
       const w = Number(edge.data("weight")) || 1;
 
       if (edge.data("type") === "style") {
-        Math.min(Math.sqrt(w) * 2, 20); // stronger pull
+        Math.min(Math.sqrt(w/100) * 2, 100); // stronger pull
       }
 
-      return Math.min(w * 0.5, 15);
+      return Math.min(Math.sqrt(w/100) * 0.5, 80);
     },
 
-    nodeSeparation: 200
+    nodeSeparation: 1000
 
   });
   cy.nodes().forEach(n => {

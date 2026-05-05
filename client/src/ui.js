@@ -15,8 +15,9 @@ export function select_neighborhood(node) {
     visit: (v, e, u, i, depth) => {
       if (depth > maxDepth) return;
 
+
       v.addClass("highlighted");
-      if (e){
+      if (e && e.data("type") !== "style") {
         e.addClass("highlighted");
         e.style("opacity", 1 - (depth-1) / (maxDepth + 1));
         e.style("width", 8 - (depth*2));
