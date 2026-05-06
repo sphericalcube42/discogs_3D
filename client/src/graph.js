@@ -134,7 +134,6 @@ export function addToGraph(data) {
           }
         });
       }
-      console.log("NODE CHECK:", styleNodeId, typeof s.total, s.total);
       const edge = cy.getElementById(edgeId);
 
       if (edge.length === 0) {

@@ -5,66 +5,99 @@ DB Queries
 
 
 -------------------
+Create the artist_artist and label_label table for contextual expand
 
-CREATE TABLE artist_label_edge (
-  artist_id INT NOT NULL,
-  label_id INT NOT NULL,
-  release_count INT NOT NULL DEFAULT 1,
+#Filter artist_label for TOP 50 Labels per Artist
 
-  PRIMARY KEY (artist_id, label_id)
-);
-
-INSERT INTO artist_label_edge (artist_id, label_id, release_count)
+CREATE MATERIALIZED VIEW artist_label_top50 AS
 SELECT artist_id, label_id, release_count
-FROM artist_label
-ON CONFLICT (artist_id, label_id)
-DO UPDATE SET release_count = EXCLUDED.release_count;
+FROM (
+  SELECT 
+    artist_id,
+    label_id,
+    release_count,
+    ROW_NUMBER() OVER (
+      PARTITION BY artist_id 
+      ORDER BY release_count DESC
+    ) AS rn
+  FROM artist_label
+) t
+WHERE rn <= 50;
 
-CREATE INDEX idx_artist_label_artist ON artist_label_edge(artist_id);
+CREATE INDEX ON artist_label_top50 (artist_id);
+CREATE INDEX ON artist_label_top50 (label_id);
 
-CREATE INDEX idx_artist_label_label ON artist_label_edge(label_id);
+#Filter artist_label_top50 for 50 Artist per Label
 
--------------------
+CREATE MATERIALIZED VIEW artist_label_top50_both AS
+SELECT artist_id, label_id, release_count
+FROM (
+  SELECT 
+    artist_id,
+    label_id,
+    release_count,
+    ROW_NUMBER() OVER (
+      PARTITION BY label_id
+      ORDER BY release_count DESC
+    ) AS rn_label
+  FROM artist_label_top50
+) t
+WHERE rn_label <= 50;
 
-CREATE TABLE label_label_projection (
-  label_id INT,
-  related_label_id INT,
-  shared_artists INT,
-  PRIMARY KEY (label_id, related_label_id)
-);
+CREATE INDEX ON artist_label_top50_both (artist_id);
+CREATE INDEX ON artist_label_top50_both (label_id);
 
-INSERT INTO label_label_projection (label_id, related_label_id, shared_artists)
-SELECT
-  a1.label_id AS label_id,
-  a2.label_id AS related_label_id,
-  COUNT(DISTINCT a1.artist_id) AS shared_artists
-FROM artist_label_edge a1
-JOIN artist_label_edge a2
-  ON a1.artist_id = a2.artist_id
- AND a1.label_id <> a2.label_id
-GROUP BY a1.label_id, a2.label_id;
+#Create artist_artist table from artist_label_top50_both
 
-CREATE INDEX idx_label_proj_label ON label_label_projection(label_id);
+CREATE MATERIALIZED VIEW artist_artist AS
+SELECT 
+  al1.artist_id AS artist_a,
+  al2.artist_id AS artist_b,
+  SUM(LEAST(al1.release_count, al2.release_count)) AS weight
+FROM artist_label_top50_both al1
+JOIN artist_label_top50_both al2 
+  ON al1.label_id = al2.label_id
+  AND al1.artist_id < al2.artist_id
+GROUP BY al1.artist_id, al2.artist_id;
 
---------------------
+CREATE INDEX ON artist_artist (artist_a);
+CREATE INDEX ON artist_artist (artist_b);
 
-CREATE TABLE artist_artist_projection (
-  artist_id INT,
-  related_artist_id INT,
-  shared_labels INT,
-  PRIMARY KEY (artist_id, related_artist_id)
-);
+#Make it one directional
 
-INSERT INTO artist_artist_projection (artist_id, related_artist_id, shared_labels)
-SELECT
-  a1.artist_id,
-  a2.artist_id,
-  COUNT(DISTINCT a1.label_id)
-FROM artist_label_edge a1
-JOIN artist_label_edge a2
-  ON a1.label_id = a2.label_id
- AND a1.artist_id <> a2.artist_id
-GROUP BY a1.artist_id, a2.artist_id;
+CREATE MATERIALIZED VIEW artist_artist_edges AS
+SELECT artist_a AS src, artist_b AS dst, weight FROM artist_artist
+UNION ALL
+SELECT artist_b AS src, artist_a AS dst, weight FROM artist_artist;
 
-CREATE INDEX idx_artist_proj_artist ON artist_artist_projection(artist_id);
+CREATE INDEX ON artist_artist_edges (src);
+CREATE INDEX ON artist_artist_edges (dst);
+
+
+#Create label_label table from artist_label_top50_both
+
+CREATE MATERIALIZED VIEW label_label AS
+SELECT 
+  al1.label_id AS label_a,
+  al2.label_id AS label_b,
+  SUM(LEAST(al1.release_count, al2.release_count)) AS weight
+FROM artist_label_top50_both al1
+JOIN artist_label_top50_both al2 
+  ON al1.artist_id = al2.artist_id
+  AND al1.label_id < al2.label_id
+GROUP BY al1.label_id, al2.label_id;
+
+CREATE INDEX ON label_label (label_a);
+CREATE INDEX ON label_label (label_b);
+
+#Make it one directional
+
+CREATE MATERIALIZED VIEW label_label_edges AS
+SELECT label_a AS src, label_b AS dst, weight FROM label_label
+UNION ALL
+SELECT label_b AS src, label_a AS dst, weight FROM label_label;
+
+CREATE INDEX ON label_label_edges (src);
+CREATE INDEX ON label_label_edges (dst);
+
 
